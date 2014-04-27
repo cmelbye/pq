@@ -37,10 +37,10 @@ Optionally, a benchmark suite can be run as part of the tests:
 * pq.ParseURL for converting urls to connection strings for sql.Open.
 * Many libpq compatible environment variables
 * Unix socket support
+* Notifications: `LISTEN`/`NOTIFY`
 
 ## Future / Things you can help with
 
-* Notifications: `LISTEN`/`NOTIFY` (see #156)
 * Better COPY FROM / COPY TO (see discussion in #181)
 
 ## Thank you (alphabetical)
@@ -83,4 +83,5 @@ code still exists in here.
 * Paul Hammond (paulhammond)
 * Ryan Smith (ryandotsmith)
 * Samuel Stauffer (samuel)
+* Timothée Peignier (cyberdelia)
 * notedit (notedit)

@@ -19,6 +19,7 @@ type Fatalistic interface {
 func openTestConnConninfo(conninfo string) (*sql.DB, error) {
 	datname := os.Getenv("PGDATABASE")
 	sslmode := os.Getenv("PGSSLMODE")
+	timeout := os.Getenv("PGCONNECT_TIMEOUT")
 
 	if datname == "" {
 		os.Setenv("PGDATABASE", "pqgotest")
@@ -26,6 +27,10 @@ func openTestConnConninfo(conninfo string) (*sql.DB, error) {
 
 	if sslmode == "" {
 		os.Setenv("PGSSLMODE", "disable")
+	}
+
+	if timeout == "" {
+		os.Setenv("PGCONNECT_TIMEOUT", "20")
 	}
 
 	return sql.Open("postgres", conninfo)
@@ -723,6 +728,10 @@ var envParseTests = []struct {
 		Env:      []string{"PGDATESTYLE=ISO, MDY"},
 		Expected: map[string]string{"datestyle": "ISO, MDY"},
 	},
+	{
+		Env:      []string{"PGCONNECT_TIMEOUT=30"},
+		Expected: map[string]string{"connect_timeout": "30"},
+	},
 }
 
 func TestParseEnviron(t *testing.T) {
@@ -885,6 +894,26 @@ func TestCommit(t *testing.T) {
 	}
 }
 
+func TestErrorClass(t *testing.T) {
+	db := openTestConn(t)
+	defer db.Close()
+
+	_, err := db.Query("SELECT int 'notint'")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	pge, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("expected *pq.Error, got %#+v", err)
+	}
+	if pge.Code.Class() != "22" {
+		t.Fatalf("expected class 28, got %v", pge.Code.Class())
+	}
+	if pge.Code.Class().Name() != "data_exception" {
+		t.Fatalf("expected data_exception, got %v", pge.Code.Class().Name())
+	}
+}
+
 func TestParseOpts(t *testing.T) {
 	tests := []struct {
 		in       string
@@ -959,6 +988,10 @@ func TestRuntimeParameters(t *testing.T) {
 		{"client_encoding=UTF8", "client_encoding", "UTF8", ResultSuccess},
 		// test a runtime parameter not supported by libpq
 		{"work_mem='139kB'", "work_mem", "139kB", ResultSuccess},
+		// test fallback_application_name
+		{"application_name=foo fallback_application_name=bar", "application_name", "foo", ResultSuccess},
+		{"application_name='' fallback_application_name=bar", "application_name", "", ResultSuccess},
+		{"fallback_application_name=bar", "application_name", "bar", ResultSuccess},
 	}
 
 	for _, test := range tests {
@@ -967,6 +1000,11 @@ func TestRuntimeParameters(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer db.Close()
+
+		// application_name didn't exist before 9.0
+		if test.param == "application_name" && getServerVersion(t, db) < 90000 {
+			continue
+		}
 
 		tryGetParameterValue := func() (value string, outcome RuntimeTestResult) {
 			defer func() {
@@ -1020,6 +1058,26 @@ func TestIsUTF8(t *testing.T) {
 	for _, test := range cases {
 		if g := isUTF8(test.name); g != test.want {
 			t.Errorf("isUTF8(%q) = %v want %v", test.name, g, test.want)
+		}
+	}
+}
+
+func TestQuoteIdentifier(t *testing.T) {
+	var cases = []struct {
+		input string
+		want  string
+	}{
+		{`foo`, `"foo"`},
+		{`foo bar baz`, `"foo bar baz"`},
+		{`foo"bar`, `"foo""bar"`},
+		{"foo\x00bar", `"foo"`},
+		{"\x00foo", `""`},
+	}
+
+	for _, test := range cases {
+		got := QuoteIdentifier(test.input)
+		if got != test.want {
+			t.Errorf("QuoteIdentifier(%q) = %v want %v", test.input, got, test.want)
 		}
 	}
 }

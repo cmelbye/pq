@@ -120,6 +120,14 @@ func Open(name string) (_ driver.Conn, err error) {
 		return nil, err
 	}
 
+	// Use the "fallback" application name if necessary
+	if fallback := o.Get("fallback_application_name"); fallback != "" {
+		if !o.Isset("application_name") {
+			o.Set("application_name", fallback)
+		}
+	}
+	o.Unset("fallback_application_name")
+
 	// We can't work with any client_encoding other than UTF-8 currently.
 	// However, we have historically allowed the user to set it to UTF-8
 	// explicitly, and there's no reason to break such programs, so allow that.
@@ -153,7 +161,7 @@ func Open(name string) (_ driver.Conn, err error) {
 		}
 	}
 
-	c, err := net.Dial(network(o))
+	c, err := dial(o)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +170,38 @@ func Open(name string) (_ driver.Conn, err error) {
 	cn.ssl(o)
 	cn.buf = bufio.NewReader(cn.c)
 	cn.startup(o)
-	return cn, nil
+	// reset the deadline, in case one was set (see dial)
+	err = cn.c.SetDeadline(time.Time{})
+	return cn, err
+}
+
+func dial(o values) (net.Conn, error) {
+	ntw, addr := network(o)
+
+	timeout := o.Get("connect_timeout")
+	// Ensure the option will not be sent.
+	o.Unset("connect_timeout")
+
+	// Zero or not specified means wait indefinitely.
+	if timeout != "" && timeout != "0" {
+		seconds, err := strconv.ParseInt(timeout, 10, 0)
+		if err != nil {
+			return nil, fmt.Errorf("invalid value for parameter connect_timeout: %s", err)
+		}
+		duration := time.Duration(seconds) * time.Second
+		// connect_timeout should apply to the entire connection establishment
+		// procedure, so we both use a timeout for the TCP connection
+		// establishment and set a deadline for doing the initial handshake.
+		// The deadline is then reset after startup() is done.
+		deadline := time.Now().Add(duration)
+		conn, err := net.DialTimeout(ntw, addr, duration)
+		if err != nil {
+			return nil, err
+		}
+		err = conn.SetDeadline(deadline)
+		return conn, err
+	}
+	return net.Dial(ntw, addr)
 }
 
 func network(o values) (string, string) {
@@ -184,6 +223,15 @@ func (vs values) Set(k, v string) {
 
 func (vs values) Get(k string) (v string) {
 	return vs[k]
+}
+
+func (vs values) Isset(k string) bool {
+	_, ok := vs[k]
+	return ok
+}
+
+func (vs values) Unset(k string) {
+	delete(vs, k)
 }
 
 // scanner implements a tokenizer for libpq-style option strings.
@@ -495,7 +543,13 @@ func (cn *conn) Prepare(q string) (driver.Stmt, error) {
 
 func (cn *conn) Close() (err error) {
 	defer errRecover(&err)
-	cn.send(cn.writeBuf('X'))
+
+	// Don't go through send(); ListenerConn relies on us not scribbling on the
+	// scratch buffer of this connection.
+	err = cn.sendSimpleMessage('X')
+	if err != nil {
+		return err
+	}
 
 	return cn.c.Close()
 }
@@ -560,6 +614,14 @@ func (cn *conn) send(m *writeBuf) {
 	if err != nil {
 		panic(err)
 	}
+}
+
+// Send a message of type typ to the server on the other end of cn.  The
+// message should have no payload.  This method does not use the scratch
+// buffer.
+func (cn *conn) sendSimpleMessage(typ byte) (err error) {
+	_, err = cn.c.Write([]byte{typ, '\x00', '\x00', '\x00', '\x04'})
+	return err
 }
 
 // recvMessage receives any message from the backend, or returns an error if
@@ -1050,7 +1112,21 @@ func (rs *rows) Next(dest []driver.Value) (err error) {
 	panic("not reached")
 }
 
-func quoteIdentifier(name string) string {
+// QuoteIdentifier quotes an "identifier" (e.g. a table or a column name) to be
+// used as part of an SQL statement.  For example:
+//
+//    tblname := "my_table"
+//    data := "my_data"
+//    err = db.Exec(fmt.Sprintf("INSERT INTO %s VALUES ($1)", pq.QuoteIdentifier(tblname)), data)
+//
+// Any double quotes in name will be escaped.  The quoted identifier will be
+// case sensitive when used in a query.  If the input string contains a zero
+// byte, the result will be truncated immediately before it.
+func QuoteIdentifier(name string) string {
+	end := strings.IndexRune(name, 0)
+	if end > -1 {
+		name = name[:end]
+	}
 	return `"` + strings.Replace(name, `"`, `""`, -1) + `"`
 }
 
@@ -1159,7 +1235,7 @@ func parseEnviron(env []string) (out map[string]string) {
 		case "PGKRBSRVNAME", "PGGSSLIB":
 			unsupported()
 		case "PGCONNECT_TIMEOUT":
-			unsupported()
+			accrue("connect_timeout")
 		case "PGCLIENTENCODING":
 			accrue("client_encoding")
 		case "PGDATESTYLE":
