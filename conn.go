@@ -10,7 +10,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/lib/pq/oid"
 	"io"
 	"io/ioutil"
 	"net"
@@ -20,6 +19,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/lib/pq/oid"
 )
 
 // Common error types
@@ -90,7 +91,11 @@ func (c *conn) writeBuf(b byte) *writeBuf {
 	return &w
 }
 
-func Open(name string) (_ driver.Conn, err error) {
+func Open(name string) (driver.Conn, error) {
+	return OpenWithConn(nil, name)
+}
+
+func OpenWithConn(c net.Conn, name string) (_ driver.Conn, err error) {
 	defer errRecover(&err)
 
 	o := make(values)
@@ -161,15 +166,18 @@ func Open(name string) (_ driver.Conn, err error) {
 		}
 	}
 
-	c, err := dial(o)
-	if err != nil {
-		return nil, err
+	if c == nil {
+		c, err = dial(o)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	cn := &conn{c: c}
 	cn.ssl(o)
 	cn.buf = bufio.NewReader(cn.c)
 	cn.startup(o)
+
 	// reset the deadline, in case one was set (see dial)
 	err = cn.c.SetDeadline(time.Time{})
 	return cn, err
